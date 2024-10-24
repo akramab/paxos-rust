@@ -10,7 +10,18 @@ pub async fn follower_main(
     load_balancer_addr: &str,
     multicast_ip: &str,
 ) {
-    let socket = UdpSocket::bind(follower_addr).await.unwrap();
+    let multicast_group = multicast_ip
+        .parse::<Ipv4Addr>()
+        .expect("Failed to parse multicast IP");
+    let local_interface = Ipv4Addr::new(127, 0, 0, 1); // Join multicast on the localhost interface
+
+    // Create a socket and bind it to the multicast group
+    let socket = UdpSocket::bind("0.0.0.0:8080").await.unwrap(); // Bind to a wildcard address and specific port
+    socket
+        .join_multicast_v4(multicast_group, local_interface)
+        .unwrap();
+
+    println!("Follower joined multicast group: {}", multicast_ip);
 
     // Register follower with leader
     let registration_message = PaxosMessage::RegisterFollower(FollowerRegistration {
@@ -27,31 +38,16 @@ pub async fn follower_main(
         .await
         .unwrap();
 
-    // Join the multicast group on localhost
-    let multicast_group = multicast_ip
-        .parse::<Ipv4Addr>()
-        .expect("Failed to parse multicast IP");
-    let local_interface = Ipv4Addr::new(127, 0, 0, 1); // Join multicast on the localhost interface
-
-    if let Err(e) = socket.join_multicast_v4(multicast_group, local_interface) {
-        println!("Failed to join multicast group: {}", e);
-    } else {
-        println!("Follower joined multicast group: {}", multicast_ip);
-    }
-
     loop {
         // Receive multicast messages from leader
         match receive_message(&socket).await {
-            Ok((message, src_addr)) => {
+            Ok((message, _src_addr)) => {
                 if let PaxosMessage::ClientRequest {
                     request_id,
                     payload,
                 } = message
                 {
-                    println!(
-                        "Follower received request from leader: {:?} from {}",
-                        payload, src_addr
-                    );
+                    println!("Follower received request from leader: {:?}", payload);
 
                     // Send acknowledgment back to the leader
                     let ack_message = PaxosMessage::FollowerAck { request_id };
