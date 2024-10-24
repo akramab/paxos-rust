@@ -9,19 +9,24 @@ pub async fn follower_main(
     leader_addr: &str,
     load_balancer_addr: &str,
     multicast_ip: &str,
+    listen_port: u16,
 ) {
     let multicast_group = multicast_ip
         .parse::<Ipv4Addr>()
         .expect("Failed to parse multicast IP");
     let local_interface = Ipv4Addr::new(127, 0, 0, 1); // Join multicast on the localhost interface
 
-    // Create a socket and bind it to the multicast group
-    let socket = UdpSocket::bind("0.0.0.0:8080").await.unwrap(); // Bind to a wildcard address and specific port
+    // Bind the follower to a unique port (e.g., 8081, 8082, etc.)
+    let bind_addr = format!("0.0.0.0:{}", listen_port);
+    let socket = UdpSocket::bind(bind_addr).await.unwrap(); // Bind to a unique port
     socket
         .join_multicast_v4(multicast_group, local_interface)
         .unwrap();
 
-    println!("Follower joined multicast group: {}", multicast_ip);
+    println!(
+        "Follower joined multicast group: {} on port {}",
+        multicast_ip, listen_port
+    );
 
     // Register follower with leader
     let registration_message = PaxosMessage::RegisterFollower(FollowerRegistration {

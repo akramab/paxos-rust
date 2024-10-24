@@ -22,11 +22,17 @@ async fn main() {
             .nth(4)
             .expect("No load balancer address provided");
         let multicast_ip = std::env::args().nth(5).expect("No multicast IP provided");
+        let listen_port: u16 = std::env::args()
+            .nth(6)
+            .expect("No listen port provided")
+            .parse()
+            .expect("Listen port must be a number");
         follower::follower_main(
             &follower_addr,
             &leader_addr,
             &load_balancer_addr,
             &multicast_ip,
+            listen_port,
         )
         .await;
     } else if role == "load_balancer" {
