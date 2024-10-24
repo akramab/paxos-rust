@@ -32,22 +32,26 @@ pub async fn follower_main(
         .parse::<Ipv4Addr>()
         .expect("Failed to parse multicast IP");
     let local_interface = Ipv4Addr::new(127, 0, 0, 1); // Join multicast on the localhost interface
-    socket
-        .join_multicast_v4(multicast_group, local_interface)
-        .unwrap();
 
-    println!("Follower joined multicast group: {}", multicast_ip);
+    if let Err(e) = socket.join_multicast_v4(multicast_group, local_interface) {
+        println!("Failed to join multicast group: {}", e);
+    } else {
+        println!("Follower joined multicast group: {}", multicast_ip);
+    }
 
     loop {
         // Receive multicast messages from leader
         match receive_message(&socket).await {
-            Ok((message, _src_addr)) => {
+            Ok((message, src_addr)) => {
                 if let PaxosMessage::ClientRequest {
                     request_id,
                     payload,
                 } = message
                 {
-                    println!("Follower received request from leader: {:?}", payload);
+                    println!(
+                        "Follower received request from leader: {:?} from {}",
+                        payload, src_addr
+                    );
 
                     // Send acknowledgment back to the leader
                     let ack_message = PaxosMessage::FollowerAck { request_id };
