@@ -27,30 +27,39 @@ pub async fn follower_main(
         .await
         .unwrap();
 
-    // Join the multicast group
-    let multicast_group = Ipv4Addr::new(224, 0, 0, 1);
-    let local_interface = Ipv4Addr::UNSPECIFIED; // Bind to any available interface
+    // Join the multicast group on localhost
+    let multicast_group = multicast_ip
+        .parse::<Ipv4Addr>()
+        .expect("Failed to parse multicast IP");
+    let local_interface = Ipv4Addr::new(127, 0, 0, 1); // Join multicast on the localhost interface
     socket
         .join_multicast_v4(multicast_group, local_interface)
         .unwrap();
 
+    println!("Follower joined multicast group: {}", multicast_ip);
+
     loop {
         // Receive multicast messages from leader
-        let (message, _src_addr) = receive_message(&socket).await.unwrap();
+        match receive_message(&socket).await {
+            Ok((message, _src_addr)) => {
+                if let PaxosMessage::ClientRequest {
+                    request_id,
+                    payload,
+                } = message
+                {
+                    println!("Follower received request from leader: {:?}", payload);
 
-        if let PaxosMessage::ClientRequest {
-            request_id,
-            payload,
-        } = message
-        {
-            println!("Follower received request from leader: {:?}", payload);
-
-            // Send acknowledgment back to the leader
-            let ack_message = PaxosMessage::FollowerAck { request_id };
-            send_message(&socket, ack_message, leader_addr)
-                .await
-                .unwrap();
-            println!("Follower acknowledged request ID: {}", request_id);
+                    // Send acknowledgment back to the leader
+                    let ack_message = PaxosMessage::FollowerAck { request_id };
+                    send_message(&socket, ack_message, leader_addr)
+                        .await
+                        .unwrap();
+                    println!("Follower acknowledged request ID: {}", request_id);
+                }
+            }
+            Err(e) => {
+                println!("Error receiving message: {}", e);
+            }
         }
     }
 }

@@ -6,7 +6,6 @@ use tokio::net::UdpSocket;
 use tokio::time::{timeout, Duration}; // For retrying and timeout
 
 pub async fn leader_main(leader_addr: &str, load_balancer_addr: &str, multicast_ip: &str) {
-    // Bind to the real network interface IP
     let socket = UdpSocket::bind(leader_addr).await.unwrap();
 
     // Set multicast TTL (Time to Live) value to 1 to restrict the message to the local network
