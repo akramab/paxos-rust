@@ -19,7 +19,7 @@ This project is a simple Paxos-based distributed system implemented in Rust usin
 ### Installation
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/paxos-distributed-system.git
+   git clone https://github.com/akramab/paxos-rust.git
    cd paxos-distributed-system
    ```
 2. Build the project:
