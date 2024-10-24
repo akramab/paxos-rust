@@ -11,7 +11,8 @@ async fn main() {
     if role == "leader" {
         let leader_addr = "127.0.0.1:8080"; // Leader address
         let load_balancer_addr = "127.0.0.1:8000"; // Load balancer address
-        leader::leader_main(leader_addr, load_balancer_addr).await;
+        let multicast_ip = "224.0.0.1"; // Multicast IP address
+        leader::leader_main(leader_addr, load_balancer_addr, multicast_ip).await;
     } else if role == "follower" {
         let follower_addr = std::env::args()
             .nth(2)
@@ -20,7 +21,14 @@ async fn main() {
         let load_balancer_addr = std::env::args()
             .nth(4)
             .expect("No load balancer address provided");
-        follower::follower_main(&follower_addr, &leader_addr, &load_balancer_addr).await;
+        let multicast_ip = std::env::args().nth(5).expect("No multicast IP provided");
+        follower::follower_main(
+            &follower_addr,
+            &leader_addr,
+            &load_balancer_addr,
+            &multicast_ip,
+        )
+        .await;
     } else if role == "load_balancer" {
         let mut lb = load_balancer::LoadBalancer::new(); // Declare lb as mutable
         lb.listen_and_route("127.0.0.1:8000").await; // Call listen_and_route with mutable reference

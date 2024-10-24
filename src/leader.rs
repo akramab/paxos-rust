@@ -1,12 +1,16 @@
+// src/leader.rs
 use crate::network::{receive_message, send_message};
 use crate::types::PaxosMessage;
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use tokio::net::UdpSocket;
-use tokio::time::{sleep, timeout, Duration}; // For retrying and timeout
+use tokio::time::{timeout, Duration}; // For retrying and timeout
 
-pub async fn leader_main(leader_addr: &str, load_balancer_addr: &str) {
+pub async fn leader_main(leader_addr: &str, load_balancer_addr: &str, multicast_ip: &str) {
+    // Bind to the real network interface IP
     let socket = UdpSocket::bind(leader_addr).await.unwrap();
+
+    // Set multicast TTL (Time to Live) value to 1 to restrict the message to the local network
+    socket.set_multicast_ttl_v4(1).unwrap();
 
     // Retry logic for registering with load balancer
     let lb_registration_message = format!("register:{}", leader_addr);
@@ -21,113 +25,88 @@ pub async fn leader_main(leader_addr: &str, load_balancer_addr: &str) {
                     "Leader registered with load balancer: {}",
                     load_balancer_addr
                 );
-                registered = true; // Registration successful
+                registered = true;
             }
             Err(e) => {
                 println!(
                     "Failed to register with load balancer, retrying in 2 seconds: {}",
                     e
                 );
-                sleep(Duration::from_secs(2)).await; // Retry after 2 seconds
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
     }
 
-    let followers = Arc::new(Mutex::new(HashSet::new()));
-
     loop {
-        let (message, src_addr) = receive_message(&socket).await.unwrap();
+        let (message, _src_addr) = receive_message(&socket).await.unwrap();
 
         match message {
-            PaxosMessage::RegisterFollower(follower) => {
-                let mut followers_guard = followers.lock().unwrap();
-                followers_guard.insert(follower.follower_addr.clone());
-                println!("Follower registered: {}", follower.follower_addr);
-            }
             PaxosMessage::ClientRequest {
                 request_id,
                 payload,
             } => {
-                let original_message = String::from_utf8_lossy(&payload).to_string(); // Capture original client message
+                let original_message = String::from_utf8_lossy(&payload).to_string();
                 println!("Leader received request from client: {}", original_message);
 
-                let follower_list: Vec<String> = {
-                    let followers_guard = followers.lock().unwrap();
-                    followers_guard.iter().cloned().collect()
+                // Multicast group address (e.g., 224.0.0.1)
+                let multicast_group = Ipv4Addr::new(224, 0, 0, 1);
+                let multicast_addr = SocketAddrV4::new(multicast_group, 8080);
+
+                let broadcast_message = PaxosMessage::ClientRequest {
+                    request_id,
+                    payload: payload.clone(),
                 };
 
-                if follower_list.is_empty() {
-                    println!("No followers registered. Cannot proceed.");
-                    continue;
+                // Serialize and send the message to the multicast group
+                let serialized_message = bincode::serialize(&broadcast_message).unwrap();
+                match socket.send_to(&serialized_message, multicast_addr).await {
+                    Ok(_) => {
+                        println!(
+                            "Leader multicast request to followers via address: {}",
+                            multicast_addr
+                        );
+                    }
+                    Err(e) => {
+                        println!("Error sending multicast message: {}", e);
+                    }
                 }
 
                 let mut acks = 0;
-                let majority = follower_list.len() / 2 + 1;
+                let majority = 2; // Expecting majority acknowledgment
 
-                // Use a timeout for each follower acknowledgment
-                for follower_addr in &follower_list {
-                    // Send the request to the follower
-                    send_message(
-                        &socket,
-                        PaxosMessage::ClientRequest {
-                            request_id,
-                            payload: payload.clone(),
-                        },
-                        follower_addr,
-                    )
-                    .await
-                    .unwrap();
-                    println!(
-                        "Leader broadcasted request to follower at {}",
-                        follower_addr
-                    );
-
-                    // Wait for acknowledgment with timeout (ex. 2 seconds)
+                // Wait for acknowledgment with timeout
+                for _ in 0..majority {
                     match timeout(Duration::from_secs(2), receive_message(&socket)).await {
                         Ok(Ok((ack, _))) => {
                             if let PaxosMessage::FollowerAck { .. } = ack {
                                 acks += 1;
-                                println!(
-                                    "Leader received acknowledgment from follower at {}",
-                                    follower_addr
-                                );
+                                println!("Leader received acknowledgment from a follower");
                             }
                         }
                         Ok(Err(e)) => {
-                            println!(
-                                "Error receiving acknowledgment from follower at {}: {}",
-                                follower_addr, e
-                            );
+                            println!("Error receiving acknowledgment from follower: {}", e);
                         }
                         Err(_) => {
-                            println!(
-                                "Timeout waiting for acknowledgment from follower at {}",
-                                follower_addr
-                            );
+                            println!("Timeout waiting for acknowledgment from followers");
                         }
                     }
 
-                    // If majority is reached, respond to load balancer immediately
                     if acks >= majority {
                         println!("Leader received majority acknowledgment, responding to load balancer at {}", load_balancer_addr);
 
                         let response = format!(
-                            "Request ID: {}\nOriginal Message: {}\nAcknowledgments Received: {}\nTotal Followers: {}\n",
-                            request_id, original_message, acks, follower_list.len()
+                            "Request ID: {}\nOriginal Message: {}\nAcknowledgments Received: {}\n",
+                            request_id, original_message, acks
                         );
                         socket
                             .send_to(response.as_bytes(), load_balancer_addr)
                             .await
                             .unwrap();
-                        break; // Stop once majority is reached
+                        break;
                     }
                 }
 
                 if acks < majority {
-                    println!(
-                        "Not enough acknowledgments to proceed (Received: {}, Majority: {}).",
-                        acks, majority
-                    );
                     let response = format!(
                         "Request ID: {}\nNot enough acknowledgments to proceed (Received: {}, Majority: {}).",
                         request_id, acks, majority
@@ -136,7 +115,6 @@ pub async fn leader_main(leader_addr: &str, load_balancer_addr: &str) {
                         .send_to(response.as_bytes(), load_balancer_addr)
                         .await
                         .unwrap();
-                    break;
                 }
             }
             _ => {}
