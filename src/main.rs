@@ -1,23 +1,31 @@
-// src/main.rs
 mod follower;
 mod leader;
 mod network;
 mod types;
 
+use tokio::sync::mpsc;
+use uuid::Uuid;
+
 #[tokio::main]
 async fn main() {
-    let role = std::env::args().nth(1).expect("No role provided");
+    let args: Vec<String> = std::env::args().collect();
+    let role = args.get(1).expect("No role provided (leader or follower)");
+    let node_id = Uuid::new_v4();
 
-    if role == "leader" {
-        let leader_addr = "127.0.0.1:8080"; // Leader address
-        leader::leader_main(leader_addr).await;
-    } else if role == "follower" {
-        let follower_addr = std::env::args()
-            .nth(2)
-            .expect("No follower address provided");
-        let leader_addr = std::env::args().nth(3).expect("No leader address provided");
-        follower::follower_main(&follower_addr, &leader_addr).await;
-    } else {
-        panic!("Invalid role! Use 'leader' or 'follower'.");
+    let (ack_tx, ack_rx) = mpsc::channel(32); // Create both sender and receiver
+
+    match role.as_str() {
+        "leader" => {
+            let leader_addr = "127.0.0.1:8080";
+            leader::leader_main(node_id, leader_addr, ack_rx).await; // Pass receiver to the leader
+        }
+        "follower" => {
+            let follower_addr = args.get(2).expect("No follower address provided");
+            let leader_addr = "127.0.0.1:8080"; // Static leader address for followers
+            follower::follower_main(node_id, follower_addr, leader_addr).await;
+        }
+        _ => {
+            eprintln!("Unknown role! Use 'leader' or 'follower'");
+        }
     }
 }

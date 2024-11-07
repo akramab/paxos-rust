@@ -1,4 +1,3 @@
-// src/network.rs
 use crate::types::PaxosMessage;
 use bincode;
 use std::net::SocketAddr;
