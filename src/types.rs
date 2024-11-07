@@ -1,13 +1,17 @@
+// src/types.rs
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FollowerRegistration {
-    pub follower_addr: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum PaxosMessage {
-    ClientRequest { request_id: u64, payload: Vec<u8> },
-    FollowerAck { request_id: u64 },
-    RegisterFollower(FollowerRegistration),
+    RegisterFollower {
+        follower_addr: String, // Define the follower address field
+    },
+    ClientRequest {
+        request_id: Uuid,
+        payload: Vec<u8>,
+    },
+    FollowerAck {
+        request_id: Uuid,
+    },
 }

@@ -1,59 +1,68 @@
+// src/leader.rs
 use crate::network::{receive_message, send_message};
 use crate::types::PaxosMessage;
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::net::UdpSocket;
-use tokio::time::{sleep, timeout, Duration}; // For retrying and timeout
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::{timeout, Duration};
+use uuid::Uuid;
 
-pub async fn leader_main(leader_addr: &str, load_balancer_addr: &str) {
-    let socket = UdpSocket::bind(leader_addr).await.unwrap();
+pub async fn leader_main(leader_addr: &str) {
+    let socket = Arc::new(UdpSocket::bind(leader_addr).await.unwrap());
+    println!("Leader running at {}", leader_addr);
 
-    // Retry logic for registering with load balancer
-    let lb_registration_message = format!("register:{}", leader_addr);
-    let mut registered = false;
-    while !registered {
-        match socket
-            .send_to(lb_registration_message.as_bytes(), load_balancer_addr)
-            .await
-        {
-            Ok(_) => {
-                println!(
-                    "Leader registered with load balancer: {}",
-                    load_balancer_addr
-                );
-                registered = true; // Registration successful
+    let followers = Arc::new(Mutex::new(Vec::new()));
+    let acks = Arc::new(Mutex::new(0));
+
+    // Channel to send acknowledgment notifications from the receiver task to the main task
+    let (ack_tx, mut ack_rx) = mpsc::channel(32);
+
+    // Background task for receiving acknowledgments
+    {
+        let socket = Arc::clone(&socket);
+        let acks = Arc::clone(&acks);
+        let ack_tx = ack_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Ok((message, src_addr)) = receive_message(&socket).await {
+                    match message {
+                        PaxosMessage::FollowerAck { request_id } => {
+                            let mut acks_guard = acks.lock().await;
+                            *acks_guard += 1;
+                            println!(
+                                "Leader received acknowledgment from follower at {}",
+                                src_addr
+                            );
+                            let _ = ack_tx.send(request_id).await; // Notify main task of acknowledgment
+                        }
+                        _ => {}
+                    }
+                }
             }
-            Err(e) => {
-                println!(
-                    "Failed to register with load balancer, retrying in 2 seconds: {}",
-                    e
-                );
-                sleep(Duration::from_secs(2)).await; // Retry after 2 seconds
-            }
-        }
+        });
     }
-
-    let followers = Arc::new(Mutex::new(HashSet::new()));
 
     loop {
         let (message, src_addr) = receive_message(&socket).await.unwrap();
 
         match message {
-            PaxosMessage::RegisterFollower(follower) => {
-                let mut followers_guard = followers.lock().unwrap();
-                followers_guard.insert(follower.follower_addr.clone());
-                println!("Follower registered: {}", follower.follower_addr);
+            PaxosMessage::RegisterFollower { follower_addr } => {
+                // Use named field syntax
+                let mut followers_guard = followers.lock().await;
+                followers_guard.push(follower_addr.clone());
+                println!("Follower registered: {}", follower_addr);
             }
-            PaxosMessage::ClientRequest {
-                request_id,
-                payload,
-            } => {
-                let original_message = String::from_utf8_lossy(&payload).to_string(); // Capture original client message
+            PaxosMessage::ClientRequest { payload, .. } => {
+                let original_message = String::from_utf8_lossy(&payload).to_string();
                 println!("Leader received request from client: {}", original_message);
 
-                let follower_list: Vec<String> = {
-                    let followers_guard = followers.lock().unwrap();
-                    followers_guard.iter().cloned().collect()
+                // Generate a unique request ID using UUID
+                let request_id = Uuid::new_v4();
+                println!("Generated UUID for request: {}", request_id);
+
+                let follower_list = {
+                    let followers_guard = followers.lock().await;
+                    followers_guard.clone()
                 };
 
                 if follower_list.is_empty() {
@@ -61,82 +70,59 @@ pub async fn leader_main(leader_addr: &str, load_balancer_addr: &str) {
                     continue;
                 }
 
-                let mut acks = 0;
+                // Reset acknowledgments
+                {
+                    let mut acks_guard = acks.lock().await;
+                    *acks_guard = 0;
+                }
                 let majority = follower_list.len() / 2 + 1;
 
-                // Use a timeout for each follower acknowledgment
+                // Send requests concurrently to all followers
                 for follower_addr in &follower_list {
-                    // Send the request to the follower
-                    send_message(
-                        &socket,
-                        PaxosMessage::ClientRequest {
-                            request_id,
-                            payload: payload.clone(),
-                        },
-                        follower_addr,
-                    )
-                    .await
-                    .unwrap();
-                    println!(
-                        "Leader broadcasted request to follower at {}",
-                        follower_addr
-                    );
+                    let socket_clone = Arc::clone(&socket);
+                    let payload_clone = payload.clone();
+                    let follower_addr_clone = follower_addr.clone();
+                    let request_id_clone = request_id;
 
-                    // Wait for acknowledgment with timeout (ex. 2 seconds)
-                    match timeout(Duration::from_secs(2), receive_message(&socket)).await {
-                        Ok(Ok((ack, _))) => {
-                            if let PaxosMessage::FollowerAck { .. } = ack {
-                                acks += 1;
-                                println!(
-                                    "Leader received acknowledgment from follower at {}",
-                                    follower_addr
-                                );
-                            }
-                        }
-                        Ok(Err(e)) => {
+                    tokio::spawn(async move {
+                        let request_message = PaxosMessage::ClientRequest {
+                            request_id: request_id_clone,
+                            payload: payload_clone,
+                        };
+
+                        if let Err(e) =
+                            send_message(&socket_clone, request_message, &follower_addr_clone).await
+                        {
                             println!(
-                                "Error receiving acknowledgment from follower at {}: {}",
-                                follower_addr, e
+                                "Failed to send request to follower {}: {}",
+                                follower_addr_clone, e
                             );
+                        } else {
+                            println!("Leader sent request to follower at {}", follower_addr_clone);
                         }
-                        Err(_) => {
+                    });
+                }
+
+                // Wait for majority of acknowledgments using the channel, with timeout
+                let mut received_acks = 0;
+                while let Ok(Some(ack_request_id)) =
+                    timeout(Duration::from_secs(2), ack_rx.recv()).await
+                {
+                    if ack_request_id == request_id {
+                        received_acks += 1;
+                        if received_acks >= majority {
                             println!(
-                                "Timeout waiting for acknowledgment from follower at {}",
-                                follower_addr
+                                "Leader received majority acknowledgment for request ID {}",
+                                request_id
                             );
+                            break;
                         }
-                    }
-
-                    // If majority is reached, respond to load balancer immediately
-                    if acks >= majority {
-                        println!("Leader received majority acknowledgment, responding to load balancer at {}", load_balancer_addr);
-
-                        let response = format!(
-                            "Request ID: {}\nOriginal Message: {}\nAcknowledgments Received: {}\nTotal Followers: {}\n",
-                            request_id, original_message, acks, follower_list.len()
-                        );
-                        socket
-                            .send_to(response.as_bytes(), load_balancer_addr)
-                            .await
-                            .unwrap();
-                        break; // Stop once majority is reached
                     }
                 }
 
-                if acks < majority {
-                    println!(
-                        "Not enough acknowledgments to proceed (Received: {}, Majority: {}).",
-                        acks, majority
-                    );
-                    let response = format!(
-                        "Request ID: {}\nNot enough acknowledgments to proceed (Received: {}, Majority: {}).",
-                        request_id, acks, majority
-                    );
-                    socket
-                        .send_to(response.as_bytes(), load_balancer_addr)
-                        .await
-                        .unwrap();
-                    break;
+                // Check if majority was not reached (in case of timeout)
+                if received_acks < majority {
+                    println!("Not enough acknowledgments for request ID {}", request_id);
                 }
             }
             _ => {}
