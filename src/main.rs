@@ -1,5 +1,6 @@
 mod follower;
 mod leader;
+mod leader_election;
 mod network;
 mod types;
 
